@@ -34,6 +34,9 @@ This is a [Chisel](https://chisel-lang.org/) generator that produces an optimize
     * dataWidth: Int – bit-width of input SInts (default 16)
     * stride: Int – pattern grid stride (default 4)
     * phase: Int – pattern grid phase offset (default 0)
+  * Return:
+    * qkOut: Vec[BLOCK_M][Vec[BLOCK_N][SInt((2*dataWidth + log2Ceil(D)).W)]] – the masked dot‐product tile
+    * valid: Bool – asserted when output reflects the selected pattern
 * SparseQKSpec
   * Parameters:
     * BM: Int – number of query rows/block (default 8)
@@ -43,7 +46,18 @@ This is a [Chisel](https://chisel-lang.org/) generator that produces an optimize
     * STRIDE: Int – grid pattern stride, must divide BM and BN (default 4)
     * PHASE: Int – grid pattern phase offset (default 0)
     * ITERS: Int – number of test iterations for timing and correctness (default 5)
+  * Return:
+    * Report of pass/fail status for different patterns, printed timing measurements (ms), and calculated speed-up ratio
 * SparseQKModel
+  * Parameters:
+    * patternFlag: PatternType.Value – which sparsity pattern to apply (e.g. NoFlag,Grid, …)
+    * enable: Boolean – when false, returns an all-zero tile; when true, computes according to patternFlag
+    * qIn: Matrix – a BM × D Seq[Seq[Int]] holding the query rows
+    * kIn: Matrix – a D × BN Seq[Seq[Int]] holding the key columns
+    * stride: Int – grid‐pattern stride (default 4)
+    * phase: Int – grid‐pattern phase offset (default 0)
+  * Return:
+    * Matrix – a BM × BN Seq[Seq[Int]] of dot-products, masked per patternFlag
 
 ## Testing
 To run the included tests, enter the following in a sbt shell:
