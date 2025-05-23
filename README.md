@@ -51,6 +51,6 @@ To run the included tests, enter the following in a sbt shell:
 sbt test
 ```
 
-## References
+## Related Works
 * [MMInfernece](https://github.com/microsoft/MInference)
 * [SpAtten](https://github.com/mit-han-lab/spatten)
