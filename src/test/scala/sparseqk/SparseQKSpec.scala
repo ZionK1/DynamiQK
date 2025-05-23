@@ -5,42 +5,101 @@ import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import scala.util.Random
+import sparseqk.SparseQKModel.{PatternType => ModelPattern}
 
-class SparseQKSpec extends AnyFlatSpec
-  with ChiselScalatestTester
-  with Matchers {
+class SparseQKSpec extends AnyFlatSpec with ChiselScalatestTester with Matchers {
 
-  /*  Design / test parameters  */
+  /*  Design/test parameters  */
   val BM     = 8
   val BN     = 8
   val D      = 16
   val DW     = 8
   val STRIDE = 4    // keep a stride that divides BM,BN
   val PHASE  = 0
-  val ITERS  = 5    // or 10/100 as you wish
+  val ITERS  = 5
 
   /* ---------- helpers ---------- */
   private val rnd = new Random(0x1234_beef)
+  private def randVal(): Int = rnd.between(-3, 4)
 
-  private def randVal() = rnd.between(-3, 4)
-
-  private def dot(a: Seq[Int], b: Seq[Int]) =
+  private def dot(a: Seq[Int], b: Seq[Int]): Int =
     a.zip(b).map { case (x,y) => x*y }.sum
 
-  private def denseRef(q: Seq[Seq[Int]], k: Seq[Seq[Int]]) = {
+  // Reference for verifying the Scala model
+  private def denseRef(q: Seq[Seq[Int]], k: Seq[Seq[Int]]): Seq[Seq[Int]] = {
     val out = Array.ofDim[Int](q.length, k.head.length)
     for (i <- q.indices; j <- k.head.indices)
       out(i)(j) = dot(q(i), k.map(_(j)))
-    out
+    out.map(_.toSeq).toSeq
   }
 
   private def gridMask(i: Int, j: Int): Boolean =
     (i % STRIDE == PHASE) && (j % STRIDE == PHASE)
 
-  /* ---------- test ---------- */
-  behavior of "SparseQK Grid flag"
+  /* ---------- test the Scala model ---------- */
+  behavior of "SparseQKModel"
 
-  it should "finish quickly and show a speed-up" in {
+  it should "match denseRef for NoFlag (dense) path" in {
+    for (_ <- 0 until ITERS) {
+      // random dense inputs
+      val qMat = Seq.tabulate(BM, D){ (_,_) => randVal() }
+      val kMat = Seq.tabulate(D, BN){ (_,_) => randVal() }
+
+      val modelDense: Seq[Seq[Int]] =
+        SparseQKModel(
+          patternFlag = ModelPattern.NoFlag,
+          enable      = true,
+          qIn         = qMat,
+          kIn         = kMat,
+          stride      = STRIDE,
+          phase       = PHASE
+        )
+
+      val ref = denseRef(qMat, kMat)
+      for {
+        i <- qMat.indices
+        j <- kMat.head.indices
+      } {
+        modelDense(i)(j) should be (ref(i)(j))
+      }
+    }
+  }
+
+  it should "apply grid sparsity correctly for Grid path" in {
+    for (_ <- 0 until ITERS) {
+      // random inputs with zeros off-grid
+      val qMat = Seq.tabulate(BM, D){ (r,_) =>
+        if (r % STRIDE == PHASE) randVal() else 0
+      }
+      val kMat = Seq.tabulate(D, BN){ (_,c) =>
+        if (c % STRIDE == PHASE) randVal() else 0
+      }
+
+      val modelGrid: Seq[Seq[Int]] =
+        SparseQKModel(
+          patternFlag = ModelPattern.Grid,
+          enable      = true,
+          qIn         = qMat,
+          kIn         = kMat,
+          stride      = STRIDE,
+          phase       = PHASE
+        )
+
+      val ref = denseRef(qMat, kMat)
+      for {
+        i <- qMat.indices
+        j <- kMat.head.indices
+      } {
+        val expected = if (gridMask(i, j)) ref(i)(j) else 0
+        modelGrid(i)(j) should be (expected)
+      }
+    }
+  }
+
+  /* ---------- test the Chisel DUT against the Scala model ---------- */
+  behavior of "SparseQK hardware"
+
+  it should "finish quickly and match the Scala model (dense vs grid)" in {
     test(new SparseQK(BM, BN, D, DW, STRIDE, PHASE)) { dut =>
 
       def time(nsBlock: => Unit): Long = {
@@ -51,51 +110,72 @@ class SparseQKSpec extends AnyFlatSpec
       var gridNs  = 0L
 
       for (_ <- 0 until ITERS) {
+        // build Q & K with grid sparsity
+        val qMat = Seq.tabulate(BM, D){ (r,_) =>
+          if (r % STRIDE == PHASE) randVal() else 0
+        }
+        val kMat = Seq.tabulate(D, BN){ (_,c) =>
+          if (c % STRIDE == PHASE) randVal() else 0
+        }
 
-        /* build Q & K with grid sparsity */
-        val qMat = Seq.tabulate(BM) { r =>
-          Seq.tabulate(D) { _ =>
-            if (r % STRIDE == PHASE) randVal() else 0
-          }
-        }
-        val kMat = Seq.tabulate(D) { _ =>
-          Seq.tabulate(BN) { c =>
-            if (c % STRIDE == PHASE) randVal() else 0
-          }
-        }
+        /* --- poke inputs once --- */
+        // patternFlag & enable set per-path below
+        for (i <- 0 until BM; d <- 0 until D)
+          dut.io.qIn(i)(d).poke(qMat(i)(d).S)
+        for (d <- 0 until D; j <- 0 until BN)
+          dut.io.kIn(d)(j).poke(kMat(d)(j).S)
 
         /* --- dense path --- */
         denseNs += time {
           dut.io.patternFlag.poke(PatternType.NoFlag)
           dut.io.enable.poke(true.B)
-          for (i <- 0 until BM; d <- 0 until D) dut.io.qIn(i)(d).poke(qMat(i)(d).S)
-          for (d <- 0 until D; j <- 0 until BN) dut.io.kIn(d)(j).poke(kMat(d)(j).S)
           dut.clock.step(1)
-          val gold = denseRef(qMat, kMat)
-          for (i <- 0 until BM; j <- 0 until BN)
-            dut.io.qkOut(i)(j).expect(gold(i)(j).S)
+
+          // compare to Scala model
+          val goldDense =
+            SparseQKModel(
+              patternFlag = ModelPattern.NoFlag,
+              enable      = true,
+              qIn         = qMat,
+              kIn         = kMat,
+              stride      = STRIDE,
+              phase       = PHASE
+            )
+          for {
+            i <- 0 until BM
+            j <- 0 until BN
+          } dut.io.qkOut(i)(j).expect(goldDense(i)(j).S)
         }
 
         /* --- grid path --- */
         gridNs += time {
           dut.io.patternFlag.poke(PatternType.Grid)
-          // same inputs still applied
+          // enable already true
           dut.clock.step(1)
-          val gold = denseRef(qMat, kMat)
-          for (i <- 0 until BM; j <- 0 until BN) {
-            val expected = if (gridMask(i,j)) gold(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
+
+          val goldGrid =
+            SparseQKModel(
+              patternFlag = ModelPattern.Grid,
+              enable      = true,
+              qIn         = qMat,
+              kIn         = kMat,
+              stride      = STRIDE,
+              phase       = PHASE
+            )
+          for {
+            i <- 0 until BM
+            j <- 0 until BN
+          } dut.io.qkOut(i)(j).expect(goldGrid(i)(j).S)
         }
       }
 
-      /* simple console log */
-      println(f"\n--- SparseQK ($ITERS trial) ---")
-      println(f"Dense (NoFlag) : ${denseNs/1e6}%.2f ms")
-      println(f"Grid  (flag)   : ${gridNs /1e6}%.2f ms")
-      println(f"Speed-up       : ${denseNs.toDouble/gridNs}%.2fx\n")
+      // simple console log
+      println(f"\n--- SparseQK ($ITERS trials) ---")
+      println(f"Dense (NoFlag): ${denseNs/1e6}%.2f ms")
+      println(f"Grid  (flag)  : ${gridNs /1e6}%.2f ms")
+      println(f"Speed-up      : ${denseNs.toDouble/gridNs}%.2fx\n")
 
-      gridNs should be < denseNs   // sanity
+      gridNs should be < denseNs   // sanity check
     }
   }
 }

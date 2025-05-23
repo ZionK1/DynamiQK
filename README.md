@@ -46,7 +46,7 @@ This is a [Chisel](https://chisel-lang.org/) generator that produces an optimize
 * SparseQKModel
 
 ## Testing
-To test the code, run the following in a sbt shell:
+To run the included tests, enter the following in a sbt shell:
 ```console
 sbt test
 ```
