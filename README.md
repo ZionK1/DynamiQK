@@ -50,3 +50,7 @@ To test the code, run the following in a sbt shell:
 ```console
 sbt test
 ```
+
+## Related Works
+* [MMInfernece](https://github.com/microsoft/MInference)
+* [SpAtten](https://github.com/mit-han-lab/spatten)
