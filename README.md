@@ -1,6 +1,6 @@
 # DynamiQK
 
-This is a [Chisel](chisel-lang.org/) generator that produces an optimized Query-Key (Q×K) attention hardware module capable of detecting and exploiting sparse attention patterns (Grid, A‑shape, Tri‑shape, Vertical‑slash) for both inter‑modality and intra‑modality attention. By tailoring the datapath to each pattern, it reduces computation and memory bandwidth in vision‑language and multimodal transformer architectures.
+This is a [Chisel](https://chisel-lang.org/) generator that produces an optimized Query-Key (Q×K) attention hardware module capable of detecting and exploiting sparse attention patterns (Grid, A‑shape, Tri‑shape, Vertical‑slash) for both inter‑modality and intra‑modality attention. By tailoring the datapath to each pattern, it reduces computation and memory bandwidth in vision‑language and multimodal transformer architectures.
 
 > The generator reads pattern metadata, builds Compressed Sparse Row (CSR) masks, and emits a fully parameterized Chisel module for the QK compute engine.
 
