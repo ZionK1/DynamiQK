@@ -1,100 +1,71 @@
-Chisel Project Template
-=======================
+# DynamiQK
 
-You've done the [Chisel Bootcamp](https://github.com/freechipsproject/chisel-bootcamp), and now you
-are ready to start your own Chisel project.  The following procedure should get you started
-with a clean running [Chisel3](https://www.chisel-lang.org/) project.
+This is a [Chisel](https://chisel-lang.org/) generator that produces an optimized Query-Key (Q×K) attention hardware module capable of detecting and exploiting sparse attention patterns (Grid, A‑shape, Tri‑shape, Vertical‑slash) for both inter‑modality and intra‑modality attention. By tailoring the datapath to each pattern, it reduces computation and memory bandwidth in vision‑language and multimodal transformer architectures.
 
-## Make your own Chisel3 project
+> The generator reads pattern metadata, builds Compressed Sparse Row (CSR) masks, and emits a fully parameterized Chisel module for the QK compute engine.
 
-### Dependencies
+## Authors
 
-#### JDK 8 or newer
+* Zion Kang <zkang5@ucsc.edu>
+* Changyang Zeng <czeng14@ucsc.edu>
 
-We recommend LTS releases Java 8 and Java 11. You can install the JDK as recommended by your operating system, or use the prebuilt binaries from [AdoptOpenJDK](https://adoptopenjdk.net/).
+## Current Implementation
+* Scala model for QK optimizations
+* Chisel component for QK optimizations
+  * Contains optimizations for intra-modality sparse patterns (Grid head, A-shape, vertical-slash)
+* Testing harness for QK optimization Chisel component
 
-#### SBT or mill
+## Future Goals
+* Inter-modality pattern optimizations like No-boundary head, K-boundary head, Q-boundary and 2D boundary head.
+* Integrating pattern detection into pipeline
+  * Option 1: Separate pattern detection Chisel module
+  * Option 2: Embed pattern detection into current QK module
+  * Note: Pattern detection in MMInference is done on software level, so we may not be able to perform both in same stage at hardware level
+* Generating appropriate multi-modal matrix input
+  * Option 1: Run MMInference flow to reproduce matrix inputs/fetch pre-existing input data from MMInference repo
+  * Option 2: Generate sparse matrix input data through GenerativeAI
+* Benchmark performance and functionality of DynamiQK vs. SpAtten (related work) for QK computation step, right now the tester dpesn't support softmax-normalized attention score validation.
 
-SBT is the most common built tool in the Scala community. You can download it [here](https://www.scala-sbt.org/download.html).  
-mill is another Scala/Java build tool without obscure DSL like SBT. You can download it [here](https://github.com/com-lihaoyi/mill/releases)
+## Documentation
+* SparseQK
+  * Parameters:
+    * BLOCK_M: Int – number of query rows per tile
+    * BLOCK_N: Int – number of key columns per tile
+    * D: Int – inner-dot-product dimension
+    * dataWidth: Int – bit-width of input SInts (default 16)
+    * stride: Int – pattern grid stride (default 4)
+    * phase: Int – pattern grid phase offset (default 0)
+  * Return:
+    * qkOut: Vec[BLOCK_M][Vec[BLOCK_N][SInt((2*dataWidth + log2Ceil(D)).W)]] – the masked dot‐product tile. For grid head, only plain dot-proct is computed. For A-Shape and Vertical-slash, softmax-normalized attention score is computed.
+    * valid: Bool – asserted when output reflects the selected pattern
+* SparseQKSpec
+  * Parameters:
+    * BM: Int – number of query rows/block (default 8)
+    * BN: Int – number of key columns/block (default 8)
+    * D: Int – dot-product inner dimension (default 16)
+    * DW: Int – data width in bits for input SInts (default 8)
+    * STRIDE: Int – grid pattern stride, must divide BM and BN (default 4)
+    * PHASE: Int – grid pattern phase offset (default 0)
+    * ITERS: Int – number of test iterations for timing and correctness (default 5)
+  * Return:
+    * Report of pass/fail status for different patterns, printed timing measurements (ms), and calculated speed-up ratio. Currently we only support non-softmax-normalized attention scores tests.
+* SparseQKModel
+  * Parameters:
+    * patternFlag: PatternType.Value – which sparsity pattern to apply (e.g. NoFlag,Grid, …)
+    * enable: Boolean – when false, returns an all-zero tile; when true, computes according to patternFlag
+    * qIn: Matrix – a BM × D Seq[Seq[Int]] holding the query rows
+    * kIn: Matrix – a D × BN Seq[Seq[Int]] holding the key columns
+    * stride: Int – grid‐pattern stride (default 4)
+    * phase: Int – grid‐pattern phase offset (default 0)
+  * Return:
+    * Matrix – a BM × BN Seq[Seq[Int]] of dot-products, masked per patternFlag
 
-### How to get started
-
-#### Create a repository from the template
-
-This repository is a Github template. You can create your own repository from it by clicking the green `Use this template` in the top right.
-Please leave `Include all branches` **unchecked**; checking it will pollute the history of your new repository.
-For more information, see ["Creating a repository from a template"](https://docs.github.com/en/free-pro-team@latest/github/creating-cloning-and-archiving-repositories/creating-a-repository-from-a-template).
-
-#### Wait for the template cleanup workflow to complete
-
-After using the template to create your own blank project, please wait a minute or two for the `Template cleanup` workflow to run which will removes some template-specific stuff from the repository (like the LICENSE).
-Refresh the repository page in your browser until you see a 2nd commit by `actions-user` titled `Template cleanup`.
-
-
-#### Clone your repository
-
-Once you have created a repository from this template and the `Template cleanup` workflow has completed, you can click the green button to get a link for cloning your repository.
-Note that it is easiest to push to a repository if you set up SSH with Github, please see the [related documentation](https://docs.github.com/en/free-pro-team@latest/github/authenticating-to-github/connecting-to-github-with-ssh). SSH is required for pushing to a Github repository when using two-factor authentication.
-
-```sh
-git clone git@github.com:ZionK1/DynamiQK.git
-cd DynamiQK
-```
-
-#### Set project organization and name in build.sbt
-
-The cleanup workflow will have attempted to provide sensible defaults for `ThisBuild / organization` and `name` in the `build.sbt`.
-Feel free to use your text editor of choice to change them as you see fit.
-
-#### Clean up the README.md file
-
-Again, use you editor of choice to make the README specific to your project.
-
-#### Add a LICENSE file
-
-It is important to have a LICENSE for open source (or closed source) code.
-This template repository has the Unlicense in order to allow users to add any license they want to derivative code.
-The Unlicense is stripped when creating a repository from this template so that users do not accidentally unlicense their own work.
-
-For more information about a license, check out the [Github Docs](https://docs.github.com/en/free-pro-team@latest/github/building-a-strong-community/adding-a-license-to-a-repository).
-
-#### Commit your changes
-```sh
-git commit -m 'Starting DynamiQK'
-git push origin main
-```
-
-### Did it work?
-
-You should now have a working Chisel3 project.
-
-You can run the included test with:
-```sh
+## Testing
+To run the included tests, enter the following in a sbt shell:
+```console
 sbt test
 ```
 
-You should see a whole bunch of output that ends with something like the following lines
-```
-[info] Tests: succeeded 1, failed 0, canceled 0, ignored 0, pending 0
-[info] All tests passed.
-[success] Total time: 5 s, completed Dec 16, 2020 12:18:44 PM
-```
-If you see the above then...
-
-### It worked!
-
-You are ready to go. We have a few recommended practices and things to do.
-
-* Use packages and following conventions for [structure](https://www.scala-sbt.org/1.x/docs/Directories.html) and [naming](http://docs.scala-lang.org/style/naming-conventions.html)
-* Package names should be clearly reflected in the testing hierarchy
-* Build tests for all your work
-* Read more about testing in SBT in the [SBT docs](https://www.scala-sbt.org/1.x/docs/Testing.html)
-* This template includes a [test dependency](https://www.scala-sbt.org/1.x/docs/Library-Dependencies.html#Per-configuration+dependencies) on [chiseltest](https://github.com/ucb-bar/chisel-testers2), this is a reasonable starting point for most tests
-  * You can remove this dependency in the build.sbt file if you want to
-* Change the name of your project in the build.sbt file
-* Change your README.md
-
-## Problems? Questions?
-
-Check out the [Chisel Users Community](https://www.chisel-lang.org/community.html) page for links to get in contact!
+## Related Works
+* [MMInference](https://github.com/microsoft/MInference)
+* [SpAtten](https://github.com/mit-han-lab/spatten)
