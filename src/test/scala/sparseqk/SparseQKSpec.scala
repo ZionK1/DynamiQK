@@ -104,10 +104,6 @@ class SparseQKSpec extends AnyFlatSpec
           val gold = denseRef(qMat, kMat)
           for (i <- 0 until BM; j <- 0 until BN) {
             val expected = if (aShapeMask(i, j)) gold(i)(j) else 0
-            val actual = dut.io.qkOut(i)(j).peek().litValue.toInt
-            if (actual != expected) {
-              println(s"Mismatch at ($i, $j): got $actual, expected $expected")
-            }
             dut.io.qkOut(i)(j).expect(expected.S)
           }
         }
