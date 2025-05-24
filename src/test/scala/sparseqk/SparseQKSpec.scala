@@ -36,8 +36,14 @@ class SparseQKSpec extends AnyFlatSpec with ChiselScalatestTester with Matchers 
   private def gridMask(i: Int, j: Int): Boolean =
     (i % STRIDE == PHASE) && (j % STRIDE == PHASE)
 
+  private def aShapeMask(i: Int, j: Int, nInit: Int = 4, nLocal: Int = STRIDE): Boolean =
+    (j < nInit) || (j >= (i - nLocal) && j <= i)
+
+  private def verticalMask(j: Int): Boolean =
+    (j % STRIDE == PHASE)
+
   /* ---------- test ---------- */
-  behavior of "SparseQK Grid flag"
+  behavior of "SparseQK Grid flag, , AShape and VerticalSlash"
 
   it should "finish quickly and show a speed-up" in {
     test(new SparseQK(BM, BN, D, DW, STRIDE, PHASE)) { dut =>
@@ -100,15 +106,52 @@ class SparseQKSpec extends AnyFlatSpec with ChiselScalatestTester with Matchers 
             dut.io.qkOut(i)(j).expect(expected.S)
           }
         }
+
+        /* --- a-shape --- */
+        aNs += time {
+          dut.io.patternFlag.poke(PatternType.AShape)
+          //dut.io.enable.poke(true.B)
+          dut.clock.step(1)
+          val gold = denseRef(qMat, kMat)
+          for (i <- 0 until BM; j <- 0 until BN) {
+            val expected = if (aShapeMask(i, j)) gold(i)(j) else 0
+            val actual = dut.io.qkOut(i)(j).peek().litValue.toInt
+            if (actual != expected) {
+              println(s"Mismatch at ($i, $j): got $actual, expected $expected")
+            }
+            dut.io.qkOut(i)(j).expect(expected.S)
+          }
+        }
+
+
+        /* --- VerticalSlash --- */
+        vNs += time {
+          dut.io.patternFlag.poke(PatternType.VerticalSlash)
+          dut.io.enable.poke(true.B)
+          dut.clock.step(1)
+          val gold = denseRef(qMat, kMat)
+          for (i <- 0 until BM; j <- 0 until BN) {
+            val valid = verticalMask(j)
+            if (valid)
+              dut.io.qkOut(i)(j).expect(gold(i)(j).S)
+          }
+        }
       }
 
       /* simple console log */
       println(f"\n--- SparseQK ($ITERS trial) ---")
       println(f"Dense (NoFlag) : ${denseNs/1e6}%.2f ms")
       println(f"Grid  (flag)   : ${gridNs /1e6}%.2f ms")
-      println(f"Speed-up       : ${denseNs.toDouble/gridNs}%.2fx\n")
+      println(f"A-Shape        : ${aNs / 1e6}%.2f ms")
+      println(f"Vertical-Slash : ${vNs / 1e6}%.2f ms")
+      println(f"Speed-up Grid  : ${denseNs.toDouble / gridNs}%.2fx")
+      println(f"Speed-up A-shape`     : ${denseNs.toDouble / aNs}%.2fx")
+      println(f"Speed-up Vertical-slash     : ${denseNs.toDouble / vNs}%.2fx")
+
 
       gridNs should be < denseNs   // sanity
+      aNs should be < denseNs
+      vNs should be < denseNs
     }
   }
 }
