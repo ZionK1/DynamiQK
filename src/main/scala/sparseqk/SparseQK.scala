@@ -23,6 +23,8 @@ class SparseQK(
   private val prodW = dataWidth * 2
   private val sumW  = prodW + log2Ceil(D)   // + guard bits
   private val normW = sumW + 4 // extra bits for normalization accuracy
+  private val halfM = BLOCK_M / 2
+  private val halfN = BLOCK_N / 2
 
   val io = IO(new Bundle {
     val patternFlag = Input(PatternType())
@@ -74,7 +76,7 @@ class SparseQK(
         val nInit = 4
         val nLocal = stride
         val scores = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
-        val maxTmp = Wire(Vec(BLOCK_M, SInt(sumW.W)))        
+        val maxTmp = Wire(Vec(BLOCK_M, SInt(sumW.W)))
         val sumExpTmp = Wire(Vec(BLOCK_M, SInt(normW.W)))
         val outMat = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
 
@@ -94,9 +96,9 @@ class SparseQK(
           maxTmp(i) := localMaxVal
         }
 
-        
 
-         for (i <- 0 until BLOCK_M) {
+
+        for (i <- 0 until BLOCK_M) {
           val sumVec = (0 until BLOCK_N).map { j =>
             val shifted = scores(i)(j) - maxTmp(i)
             val shiftAmt = (shifted +& 4.S).asUInt.apply(4, 0)
@@ -123,54 +125,103 @@ class SparseQK(
 
 
       is(PatternType.VerticalSlash) {
-      val step = stride
-      val scores = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
-      val maxTmp = Wire(Vec(BLOCK_M, SInt(sumW.W)))
-      val outMat = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
+        val step = stride
+        val scores = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
+        val maxTmp = Wire(Vec(BLOCK_M, SInt(sumW.W)))
+        val outMat = Wire(Vec(BLOCK_M, Vec(BLOCK_N, SInt(sumW.W))))
 
-      val sumExpTmp = Wire(Vec(BLOCK_M, SInt(normW.W)))
-      for (i <- 0 until BLOCK_M) sumExpTmp(i) := 0.S
+        val sumExpTmp = Wire(Vec(BLOCK_M, SInt(normW.W)))
+        for (i <- 0 until BLOCK_M) sumExpTmp(i) := 0.S
 
-      for (i <- 0 until BLOCK_M) {
-        val localMax = (0 until BLOCK_N).map { j =>
-          val verticalHit = (j % step == phase)
-          val kVec = VecInit.tabulate(D)(d => io.kIn(d)(j))
-          val dotVal = Mux(verticalHit.B, dot(io.qIn(i), kVec), 0.S(sumW.W))
-          io.qkOut(i)(j) := dotVal
-          scores(i)(j) := dotVal
-          dotVal
-        }.fold(m(i))((acc, value) => Mux(value > acc, value, acc))
+        for (i <- 0 until BLOCK_M) {
+          val localMax = (0 until BLOCK_N).map { j =>
+            val verticalHit = (j % step == phase)
+            val kVec = VecInit.tabulate(D)(d => io.kIn(d)(j))
+            val dotVal = Mux(verticalHit.B, dot(io.qIn(i), kVec), 0.S(sumW.W))
+            io.qkOut(i)(j) := dotVal
+            scores(i)(j) := dotVal
+            dotVal
+          }.fold(m(i))((acc, value) => Mux(value > acc, value, acc))
 
-        maxTmp(i) := localMax
-      }
-
-      for (i <- 0 until BLOCK_M) {
-        val sumVec = (0 until BLOCK_N).map { j =>
-          val shifted = scores(i)(j) - maxTmp(i)
-          val shiftAmt = (shifted +& 4.S).asUInt.apply(4, 0)
-          val expApprox: SInt = Mux(shifted > (-4).S, (1.U << shiftAmt).asSInt, 1.S)
-          outMat(i)(j) := expApprox
-          expApprox
+          maxTmp(i) := localMax
         }
-        sumExpTmp(i) := sumVec.reduce(_ +& _)
-      }
 
-      for (i <- 0 until BLOCK_M) {
-        m(i) := maxTmp(i)
-        l(i) := l(i) + sumExpTmp(i)
-        for (j <- 0 until BLOCK_N) {
-          val verticalHit = (j % step == phase)
-          when(verticalHit.B){
-            o(i)(j) := o(i)(j) + ((outMat(i)(j) << 8) / sumExpTmp(i))
+        for (i <- 0 until BLOCK_M) {
+          val sumVec = (0 until BLOCK_N).map { j =>
+            val shifted = scores(i)(j) - maxTmp(i)
+            val shiftAmt = (shifted +& 4.S).asUInt.apply(4, 0)
+            val expApprox: SInt = Mux(shifted > (-4).S, (1.U << shiftAmt).asSInt, 1.S)
+            outMat(i)(j) := expApprox
+            expApprox
+          }
+          sumExpTmp(i) := sumVec.reduce(_ +& _)
+        }
+
+        for (i <- 0 until BLOCK_M) {
+          m(i) := maxTmp(i)
+          l(i) := l(i) + sumExpTmp(i)
+          for (j <- 0 until BLOCK_N) {
+            val verticalHit = (j % step == phase)
+            when(verticalHit.B){
+              o(i)(j) := o(i)(j) + ((outMat(i)(j) << 8) / sumExpTmp(i))
+            }
           }
         }
       }
-    }
 
-      is(PatternType.NoBoundary)    { io.valid := true.B }
-      is(PatternType.KBoundary)     { io.valid := true.B }
-      is(PatternType.QBoundary)     { io.valid := true.B }
-      is(PatternType.TwoDBoundary)  { io.valid := true.B }
+      is(PatternType.NoBoundary)    {
+        for (i <- 0 until BLOCK_M; j <- 0 until BLOCK_N) {
+          io.qkOut(i)(j) :=
+            dot(io.qIn(i), VecInit.tabulate(D)(d => io.kIn(d)(j)))
+        }
+        io.valid := true.B
+      }
+
+      is(PatternType.KBoundary)     {
+        for (i <- 0 until BLOCK_M; j <- 0 until BLOCK_N) {
+          val iHalf = (i < halfM).B
+          val jHalf = (j < halfN).B
+          val keyHit = iHalf === jHalf
+          when(keyHit) {
+            io.qkOut(i)(j) :=
+              dot(io.qIn(i), VecInit.tabulate(D)(d => io.kIn(d)(j)))
+          }.otherwise {
+            io.qkOut(i)(j) := 0.S(sumW.W)
+          }
+        }
+        io.valid := true.B
+      }
+
+      is(PatternType.QBoundary)     {
+        for (i <- 0 until BLOCK_M; j <- 0 until BLOCK_N) {
+          val jHalf = (j < halfN).B
+          val iHalf = (i < halfM).B
+          val queryHit = iHalf === jHalf
+          when(queryHit) {
+            io.qkOut(i)(j) :=
+              dot(io.qIn(i), VecInit.tabulate(D)(d => io.kIn(d)(j)))
+          }.otherwise {
+            io.qkOut(i)(j) := 0.S(sumW.W)
+          }
+        }
+        io.valid := true.B
+      }
+
+      is(PatternType.TwoDBoundary)  {
+        for (i <- 0 until BLOCK_M; j <- 0 until BLOCK_N) {
+          val topHalfHit    = (i < halfM).B && (j < halfN).B
+          val bottomHalfHit = (i >= halfM).B && (j >= halfN).B
+          val hit2D = topHalfHit || bottomHalfHit
+
+          when(hit2D) {
+            io.qkOut(i)(j) :=
+              dot(io.qIn(i), VecInit.tabulate(D)(d => io.kIn(d)(j)))
+          }.otherwise {
+            io.qkOut(i)(j) := 0.S(sumW.W)
+          }
+        }
+        io.valid := true.B
+      }
     }
   }
 
