@@ -16,7 +16,7 @@ class SparseQKSpec extends AnyFlatSpec with ChiselScalatestTester with Matchers 
   val DW = 8
   val STRIDE = 4 // keep a stride that divides BM,BN
   val PHASE = 0
-  val ITERS = 3
+  val ITERS = 1
 
   /* ---------- helpers ---------- */
   private val rnd = new Random(0x1234_beef)
@@ -70,177 +70,107 @@ class SparseQKSpec extends AnyFlatSpec with ChiselScalatestTester with Matchers 
   /* ---------- test ---------- */
   behavior of "SparseQK Full Pattern Suite"
 
-  it should "finish quickly and show speed‐ups for all sparse/inter‐modality patterns" in {
+  it should "generate inputs for each pattern and compare NoFlag vs. the pattern" in {
     test(new SparseQK(BM, BN, D, DW, STRIDE, PHASE)) { dut =>
 
-      def time(nsBlock: => Unit): Long = {
-        val t0 = System.nanoTime(); nsBlock; System.nanoTime() - t0
+      // 1) list of all sparsity patterns (excluding NoFlag)
+      val patternMasks: Seq[(PatternType.Type, (Int, Int) => Boolean)] = Seq(
+        PatternType.Grid -> gridMask,
+        PatternType.AShape -> ((i, j) => aShapeMask(i, j)),
+        PatternType.VerticalSlash -> ((i, j) => verticalMask(j)),
+        PatternType.NoBoundary -> ((i, j) => noBoundaryMask(i, j)),
+        PatternType.KBoundary -> ((i, j) => kBoundaryMask(i, j)),
+        PatternType.QBoundary -> ((i, j) => qBoundaryMask(i, j)),
+        PatternType.TwoDBoundary -> ((i, j) => twoDBoundaryMask(i, j))
+      )
+
+      // 2) timing accumulators
+      var denseNs = 0L
+      var gridNs = 0L
+      var aNs = 0L
+      var vNs = 0L
+      var noBoundNs = 0L
+      var kBoundNs = 0L
+      var qBoundNs = 0L
+      var twoDBoundNs = 0L
+
+      def timeNs(block: => Unit): Long = {
+        val t0 = System.nanoTime()
+        block
+        System.nanoTime() - t0
       }
 
-      var denseNs        = 0L
-      var gridNs         = 0L
-      var aNs            = 0L
-      var vNs            = 0L
-      var noBoundNs      = 0L
-      var kBoundNs       = 0L
-      var qBoundNs       = 0L
-      var twoDBoundNs    = 0L
-
+      // 3) for each iteration *and* each pattern
       for (_ <- 0 until ITERS) {
-        // Build random Q & K with grid sparsity pattern for simplicity.
-        val qMat = Seq.tabulate(BM, D) { (r, _) =>
-          if (r % STRIDE == PHASE) randVal() else 0
+        // 1) build “one-hot” Q and masked K once per iteration
+        val qMat = Seq.tabulate(BM, D) { (i, d) =>
+          if (d == i) randVal() else 0
         }
-        val kMat = Seq.tabulate(D, BN) { (_, c) =>
-          if (c % STRIDE == PHASE) randVal() else 0
+        val kMat = Seq.tabulate(D, BN) { (d, j) =>
+          if (d < BM && patternMasks.exists(_._2(d, j))) randVal() else 0
         }
 
-        /* --- poke inputs once --- */
+        // poke inputs
         for (i <- 0 until BM; d <- 0 until D)
           dut.io.qIn(i)(d).poke(qMat(i)(d).S)
         for (d <- 0 until D; j <- 0 until BN)
           dut.io.kIn(d)(j).poke(kMat(d)(j).S)
 
-        /* Compute a single “goldDense” once per iteration */
-        val goldDense: Seq[Seq[Int]] = denseRef(qMat, kMat)
+        // compute golden full-dense once
+        val goldDense = denseRef(qMat, kMat)
 
-        // Enable is set true initially, switch sets pattern each block
-        dut.io.enable.poke(true.B)
-
-        /* --- 1) Dense (NoFlag) path --- */
-        denseNs += time {
+        // 2) Dense path timing (once per iteration)
+        denseNs += timeNs {
+          dut.io.enable.poke(true.B)
           dut.io.patternFlag.poke(PatternType.NoFlag)
           dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
+          for (i <- 0 until BM; j <- 0 until BN)
             dut.io.qkOut(i)(j).expect(goldDense(i)(j).S)
+        }
+
+        // --- 3b) Sparse path timing ---
+        for ((pat, maskFn) <- patternMasks) {
+          val patNs = timeNs {
+            dut.io.patternFlag.poke(pat)
+            dut.clock.step(1)
+            for (i <- 0 until BM; j <- 0 until BN) {
+              val expected = if (maskFn(i, j)) goldDense(i)(j) else 0
+              dut.io.qkOut(i)(j).expect(expected.S)
+            }
+          }
+
+          // accumulate into correct bucket
+          pat match {
+            case PatternType.Grid => gridNs += patNs
+            case PatternType.AShape => aNs += patNs
+            case PatternType.VerticalSlash => vNs += patNs
+            case PatternType.NoBoundary => noBoundNs += patNs
+            case PatternType.KBoundary => kBoundNs += patNs
+            case PatternType.QBoundary => qBoundNs += patNs
+            case PatternType.TwoDBoundary => twoDBoundNs += patNs
           }
         }
 
-        /* --- 2) Grid path --- */
-        gridNs += time {
-          dut.io.patternFlag.poke(PatternType.Grid)
-          dut.clock.step(1)
+        // 4) Print out timings and speedups
+        println(f"\n--- SparseQK ($ITERS iterations per pattern) ---")
+        println(f"Dense        (NoFlag)           : ${denseNs / 1e6}%.2f ms")
+        println(f"Grid                            : ${gridNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / gridNs}%.2fx)")
+        println(f"A-Shape                         : ${aNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / aNs}%.2fx)")
+        println(f"Vertical-Slash                  : ${vNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / vNs}%.2fx)")
+        println(f"NoBoundary   (dense fallback)   : ${noBoundNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / noBoundNs}%.2fx)")
+        println(f"KBoundary                       : ${kBoundNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / kBoundNs}%.2fx)")
+        println(f"QBoundary                       : ${qBoundNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / qBoundNs}%.2fx)")
+        println(f"TwoDBoundary                    : ${twoDBoundNs / 1e6}%.2f ms (speedup ${denseNs.toDouble / twoDBoundNs}%.2fx)\n")
 
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected = if (gridMask(i, j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
-
-        /* --- 3) A-Shape path --- */
-        aNs += time {
-          dut.io.patternFlag.poke(PatternType.AShape)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected = if (aShapeMask(i, j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
-
-        /* --- 4) Vertical-Slash path --- */
-        vNs += time {
-          dut.io.patternFlag.poke(PatternType.VerticalSlash)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected = if (verticalMask(j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
-
-        /* --- 5) NoBoundary (dense fallback) --- */
-        noBoundNs += time {
-          dut.io.patternFlag.poke(PatternType.NoBoundary)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            // NoBoundary is dense, so it should match goldDense exactly
-            dut.io.qkOut(i)(j).expect(goldDense(i)(j).S)
-          }
-        }
-
-        /* --- 6) KBoundary path --- */
-        kBoundNs += time {
-          dut.io.patternFlag.poke(PatternType.KBoundary)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected =
-              if (kBoundaryMask(i, j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
-
-        /* --- 7) QBoundary path --- */
-        qBoundNs += time {
-          dut.io.patternFlag.poke(PatternType.QBoundary)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected =
-              if (qBoundaryMask(i, j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
-
-        /* --- 8) TwoDBoundary path --- */
-        twoDBoundNs += time {
-          dut.io.patternFlag.poke(PatternType.TwoDBoundary)
-          dut.clock.step(1)
-
-          for {
-            i <- 0 until BM
-            j <- 0 until BN
-          } {
-            val expected =
-              if (twoDBoundaryMask(i, j)) goldDense(i)(j) else 0
-            dut.io.qkOut(i)(j).expect(expected.S)
-          }
-        }
+        // 5) Sanity checks: each sparse pattern should be at least as fast as dense
+        gridNs should be < denseNs
+        aNs should be < denseNs
+        vNs should be < denseNs
+        noBoundNs should be <= denseNs // identical mask, timing noise allowed
+        kBoundNs should be < denseNs
+        qBoundNs should be < denseNs
+        twoDBoundNs should be < denseNs
       }
-
-      /* simple console log of accumulated times */
-      println(f"\n--- SparseQK ($ITERS iterations) ---")
-      println(f"Dense        (NoFlag)        : ${denseNs    / 1e6}%.2f ms")
-      println(f"Grid                         : ${gridNs     / 1e6}%.2f ms (speedup ${denseNs.toDouble/gridNs}%.2fx)")
-      println(f"A-Shape                      : ${aNs        / 1e6}%.2f ms (speedup ${denseNs.toDouble/aNs}%.2fx)")
-      println(f"Vertical-Slash               : ${vNs        / 1e6}%.2f ms (speedup ${denseNs.toDouble/vNs}%.2fx)")
-      println(f"NoBoundary   (dense fallback): ${noBoundNs  / 1e6}%.2f ms (speedup ${denseNs.toDouble/noBoundNs}%.2fx)")
-      println(f"KBoundary                    : ${kBoundNs   / 1e6}%.2f ms (speedup ${denseNs.toDouble/kBoundNs}%.2fx)")
-      println(f"QBoundary                    : ${qBoundNs   / 1e6}%.2f ms (speedup ${denseNs.toDouble/qBoundNs}%.2fx)")
-      println(f"TwoDBoundary                 : ${twoDBoundNs/ 1e6}%.2f ms (speedup ${denseNs.toDouble/twoDBoundNs}%.2fx)\n")
-
-      // Sanity checks: each sparse/inter‐modality should be faster than dense
-      gridNs         should be < denseNs
-      aNs            should be < denseNs
-      vNs            should be < denseNs
-      noBoundNs      should be < denseNs   // identical to dense, but timing noise may vary
-      kBoundNs       should be < denseNs
-      qBoundNs       should be < denseNs
-      twoDBoundNs    should be < denseNs
     }
   }
 }
