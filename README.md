@@ -25,7 +25,7 @@ To run the included tests, enter the following in a sbt shell:
 ```console
 sbt test
 ```
-Note: The default parameters for the test take a few minutes to run. You can lower the dimensions of the inputs by making BM and BN smaller, which will significantly drop the runtime. However, there will be less of speedup, given the nature of less workload.
+Note: The default parameters for the test take a few minutes to run. You can lower the dimensions of the inputs by making BM and BN smaller, which will significantly drop the runtime. However, there will be less of speedup, given the nature of less workload. Conversely, raising BM, BN, and ITERS will lead to a greater speedup reported as the dense case gets worse with more required computations.
 
 ## Future Goals
 * Implement pattern detection for all sparsity patterns (Currently only capable of A-shape and Vertical Slash)
